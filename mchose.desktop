@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Mouse
+Comment=Configure the MCHOSE mouse
+Exec=mchose-gui
+Icon=mchose
+Terminal=false
+Categories=Settings;HardwareSettings;

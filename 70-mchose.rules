@@ -1,0 +1,5 @@
+# MCHOSE mice: let the desktop user talk to the vendor configuration interface.
+# Without this the hidraw nodes are root:root 0600 and both the M HUB web
+# driver and the mchose CLI fail silently.
+KERNEL=="hidraw*", ATTRS{idVendor}=="5253", MODE="0660", GROUP="input", TAG+="uaccess"
+KERNEL=="hidraw*", ATTRS{idVendor}=="3837", MODE="0660", GROUP="input", TAG+="uaccess"

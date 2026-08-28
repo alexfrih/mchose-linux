@@ -1,0 +1,7 @@
+target/
+
+# The M HUB bundle is MCHOSE's own code. protocol/fetch.sh downloads it and
+# protocol/extract.sh makes it readable; it is not redistributed here.
+protocol/mhub-bundle/
+protocol/tools/node_modules/
+protocol/tools/package-lock.json
