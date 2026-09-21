@@ -211,11 +211,7 @@ fn open_device(explicit: Option<&str>) -> Result<HidRaw, String> {
     if let Some(path) = explicit {
         return HidRaw::open(std::path::Path::new(path)).map_err(|e| open_hint(path, e));
     }
-    let found = candidates()?;
-    let node = found
-        .first()
-        .ok_or("no MCHOSE configuration interface found. Is the mouse or its dongle plugged in?")?;
-    HidRaw::open(&node.dev).map_err(|e| open_hint(&node.dev.to_string_lossy(), e))
+    mchose::device::open().map_err(io)
 }
 
 fn open_hint(path: &str, e: std::io::Error) -> String {

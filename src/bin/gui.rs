@@ -1,7 +1,7 @@
 //! One window for the mouse. Everything applies as you touch it.
 
 use eframe::egui::{self, Color32, CornerRadius, Frame, Margin, RichText, Stroke, Vec2};
-use mchose::hidraw::{self, HidRaw};
+use mchose::hidraw::HidRaw;
 use mchose::logln;
 use mchose::preset::{self, Preset};
 use mchose::proto::{self, Config, DPI_STAGES};
@@ -107,18 +107,7 @@ fn str_err(e: std::io::Error) -> String {
 }
 
 fn open() -> Result<HidRaw, String> {
-    let nodes = hidraw::nodes().map_err(str_err)?;
-    let node = nodes
-        .into_iter()
-        .find(|n| matches!(n.vid, 0x5253 | 0x3837) && hidraw::has_config_collection(&n.descriptor))
-        .ok_or("No MCHOSE mouse found. Plug in the dongle.")?;
-    HidRaw::open(&node.dev).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::PermissionDenied {
-            format!("{} is not readable. Run install.sh once.", node.dev.display())
-        } else {
-            format!("{}: {e}", node.dev.display())
-        }
-    })
+    mchose::device::open().map_err(str_err)
 }
 
 fn edit<F: Fn(&mut Config)>(dev: &HidRaw, change: F) -> Result<(), String> {

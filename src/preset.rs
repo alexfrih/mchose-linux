@@ -30,8 +30,8 @@ pub struct Preset {
 /// predicts or delays is off: motion sync costs about a millisecond by pinning
 /// sensor reads to the polling clock, ripple control is smoothing, and angle
 /// snapping invents straight lines you did not draw. The lowest lift-off keeps
-/// the crosshair still while you re-centre the mouse, and the mouse must never
-/// sleep mid-round.
+/// the crosshair still while you re-centre the mouse. Sleep after five idle
+/// minutes keeps a forgotten mouse from staying awake overnight.
 pub const CS: Preset = Preset {
     stage: 1,
     dpi: 800,
@@ -41,7 +41,7 @@ pub const CS: Preset = Preset {
     ripple: false,
     angle_snap: false,
     debounce_ms: 3,
-    sleep_min: 0,
+    sleep_min: 5,
     game_mode: 3,
 };
 
@@ -198,4 +198,15 @@ pub fn save(name: &str, p: &Preset) -> io::Result<()> {
         std::fs::create_dir_all(dir)?;
     }
     std::fs::write(path, text)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn built_in_presets_never_disable_idle_sleep() {
+        for (name, preset) in builtin() {
+            assert!(preset.sleep_min > 0, "{name} disables automatic sleep");
+        }
+    }
 }

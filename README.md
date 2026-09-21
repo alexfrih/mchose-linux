@@ -99,8 +99,8 @@ DPI, 1000 Hz, and everything that smooths or delays turned off. Motion sync
 costs about a millisecond by pinning sensor reads to the polling clock, ripple
 control is smoothing, and angle snapping invents straight lines you did not
 draw. Lift-off at 1 mm so the crosshair holds still while you re-centre, a 3 ms
-debounce, and sleep off, because a mouse that naps mid-round is worse than a
-flat battery.
+debounce, and sleep after five minutes of inactivity. Playing does not count
+as inactivity; leaving a mouse on overnight should not keep it awake.
 
 **`desk`** takes the opposite trade: 1600 DPI, 500 Hz, smoothing on, lift-off at
 2 mm, a 10 ms debounce so a tired switch never double-fires in a file manager,
