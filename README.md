@@ -41,6 +41,11 @@ Developed and verified on an **MCHOSE L7 Pro** (`5253:1020`, 8 kHz dongle,
 if yours does not, open an issue with the output of `mchose devices` and
 `mchose log`.
 
+**Not supported: the G3 family** (G3 V2 `3837:4245` and its siblings). They
+show up in `mchose devices` because they carry the same vendor collection, but
+M HUB drives them with a different protocol, so `mchose info` answers "is not
+supported" rather than talking to them.
+
 ## Install
 
 ```sh

@@ -22,6 +22,19 @@ fn first_responsive<T>(nodes: Vec<Node>, mut probe: impl FnMut(&Node) -> io::Res
     Err(io::Error::new(io::ErrorKind::NotConnected, format!("No responding MCHOSE mouse. {detail}")))
 }
 
+/// EPIPE is the mouse stalling the request: it has the vendor collection but
+/// not these feature reports. M HUB drives those models (the G3 family) with
+/// a different protocol, so say that instead of "Broken pipe".
+fn refused(node: &Node, error: io::Error) -> io::Error {
+    if error.raw_os_error() != Some(libc::EPIPE) {
+        return error;
+    }
+    io::Error::new(io::ErrorKind::Unsupported, format!(
+        "{} ({:04x}:{:04x}) is not supported: it refuses the L7-family protocol this tool speaks",
+        node.name, node.vid, node.pid
+    ))
+}
+
 pub fn open() -> io::Result<HidRaw> {
     let mut found = candidates()?;
     // This known L7 wired interface answers even while its separate receiver
@@ -29,7 +42,7 @@ pub fn open() -> io::Result<HidRaw> {
     found.sort_by_key(|n| n.pid != 0x00b0);
     first_responsive(found, |node| {
         let dev = HidRaw::open(&node.dev)?;
-        let identity = proto::identity(&dev)?;
+        let identity = proto::identity(&dev).map_err(|e| refused(node, e))?;
         if identity.connect_mode == 1 && !identity.connected {
             return Err(io::Error::new(io::ErrorKind::NotConnected, "receiver has no active mouse"));
         }
@@ -53,6 +66,15 @@ mod tests {
         }).unwrap();
         assert_eq!(selected.to_str(), Some("mouse"));
         assert_eq!(attempts.len(), 2);
+    }
+    #[test]
+    fn stalled_request_names_the_unsupported_model() {
+        let g3 = Node { dev: "g3".into(), vid: 0x3837, pid: 0x4245, name: "YJX-CHIP MCHOSE G3 V2".into(), descriptor: vec![] };
+        let error = refused(&g3, io::Error::from_raw_os_error(libc::EPIPE));
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+        assert!(error.to_string().contains("MCHOSE G3 V2 (3837:4245) is not supported"));
+        let other = refused(&g3, io::ErrorKind::PermissionDenied.into());
+        assert_eq!(other.kind(), io::ErrorKind::PermissionDenied);
     }
     #[test]
     fn no_device_is_an_error_not_empty_success() {
