@@ -3,15 +3,14 @@
 //! There is no vendor Linux app and libratbag does not know these mice. The
 //! protocol was recovered from the M HUB web driver; PROTOCOL.md documents it.
 
+use mchose::device::{Family, Mouse};
+use mchose::g3;
 use mchose::hidraw::{self, HidRaw};
 use mchose::preset::{self, Preset};
 use mchose::proto::{self, Config, DPI_STAGES, RATES};
 use std::fs;
 use std::path::PathBuf;
 use std::process::ExitCode;
-
-/// Vendors the M HUB driver treats with this protocol.
-const VENDORS: [u16; 2] = [0x5253, 0x3837];
 
 const USAGE: &str = "\
 mchose - configure MCHOSE mice on Linux
@@ -24,7 +23,7 @@ mchose - configure MCHOSE mice on Linux
   mchose dpi <value> --stage N   set stage N (0-5)
   mchose dpi --list a,b,c,d,e,f  set all six stages at once
   mchose stage <0-5>             switch the active stage
-  mchose rate <hz>               125 500 1000 2000 4000 8000
+  mchose rate <hz>               125 500 1000 2000 4000 8000 (G3 family: 125 250 500 1000)
   mchose debounce <ms>
   mchose sleep <minutes>         0 disables
   mchose profile <0-2>
@@ -90,30 +89,34 @@ fn run(args: &[String]) -> R {
         return Ok(());
     }
 
-    let dev = open_device(explicit.as_deref())?;
+    let mouse = open_device(explicit.as_deref())?;
+    if mouse.family == Family::G3 {
+        return run_g3(&mouse, command, &args, raw_flag, stage_opt, list_opt);
+    }
+    let dev = &mouse.dev;
 
     match command {
-        "info" => info(&dev),
-        "show" => show(&dev, raw_flag),
+        "info" => info(dev),
+        "show" => show(dev, raw_flag),
         "dpi" => {
             if let Some(list) = list_opt {
-                dpi_list(&dev, &list)
+                dpi_list(dev, &list)
             } else {
                 let value: u16 = num(args.get(1), "dpi <value>")?;
                 let stage = match stage_opt {
                     Some(s) => Some(s.parse::<u8>().map_err(|_| "--stage takes 0-5")?),
                     None => None,
                 };
-                dpi(&dev, value, stage)
+                dpi(dev, value, stage)
             }
         }
-        "stage" => stage(&dev, num(args.get(1), "stage <0-5>")?),
-        "rate" => rate(&dev, num(args.get(1), "rate <hz>")?),
-        "debounce" => debounce(&dev, num(args.get(1), "debounce <ms>")?),
-        "sleep" => sleep_minutes(&dev, num(args.get(1), "sleep <minutes>")?),
+        "stage" => stage(dev, num(args.get(1), "stage <0-5>")?),
+        "rate" => rate(dev, num(args.get(1), "rate <hz>")?),
+        "debounce" => debounce(dev, num(args.get(1), "debounce <ms>")?),
+        "sleep" => sleep_minutes(dev, num(args.get(1), "sleep <minutes>")?),
         "profile" => {
             let p: u8 = num(args.get(1), "profile <0-2>")?;
-            proto::set_profile(&dev, p).map_err(io)?;
+            proto::set_profile(dev, p).map_err(io)?;
             println!("profile {p}");
             Ok(())
         }
@@ -124,25 +127,25 @@ fn run(args: &[String]) -> R {
                 2 => 1,
                 _ => return Err("lod takes 1 or 2 (mm)".into()),
             };
-            flags(&dev, |lod, _, _, _| *lod = index)?;
+            flags(dev, |lod, _, _, _| *lod = index)?;
             println!("lift-off distance {mm} mm");
             Ok(())
         }
         "motion-sync" => {
             let on = onoff(args.get(1))? == 1;
-            flags(&dev, |_, _, _, sync| *sync = on)?;
+            flags(dev, |_, _, _, sync| *sync = on)?;
             println!("motion sync {}", onoff_str(on));
             Ok(())
         }
         "ripple" => {
             let on = onoff(args.get(1))? == 1;
-            flags(&dev, |_, r, _, _| *r = on)?;
+            flags(dev, |_, r, _, _| *r = on)?;
             println!("ripple control {}", onoff_str(on));
             Ok(())
         }
         "angle-snap" => {
             let on = onoff(args.get(1))? == 1;
-            flags(&dev, |_, _, a, _| *a = on)?;
+            flags(dev, |_, _, a, _| *a = on)?;
             println!("angle snapping {}", onoff_str(on));
             Ok(())
         }
@@ -151,22 +154,22 @@ fn run(args: &[String]) -> R {
             if !(1..=3).contains(&mode) {
                 return Err("game-mode takes 1, 2 or 3".into());
             }
-            proto::set_game_mode(&dev, mode).map_err(io)?;
+            proto::set_game_mode(dev, mode).map_err(io)?;
             std::thread::sleep(std::time::Duration::from_millis(60));
-            let (_, _, _, got) = proto::basics(&dev).map_err(io)?;
+            let (_, _, _, got) = proto::basics(dev).map_err(io)?;
             if got != mode {
                 return Err(format!("the mouse did not take game mode {mode} (it reports {got})"));
             }
             println!("game mode {mode}");
             Ok(())
         }
-        "backup" => backup(&dev, args.get(1).map(PathBuf::from)),
-        "restore" => restore(&dev, args.get(1).ok_or("usage: mchose restore <file>")?),
+        "backup" => backup(dev, args.get(1).map(PathBuf::from)),
+        "restore" => restore(dev, args.get(1).ok_or("usage: mchose restore <file>")?),
         "preset" => match args.get(1).map(String::as_str) {
-            None => list_presets(&dev),
+            None => list_presets(dev),
             Some("save") => {
                 let name = args.get(2).ok_or("usage: mchose preset save <name>")?;
-                let now = preset::current(&dev).map_err(io)?;
+                let now = preset::current(dev).map_err(io)?;
                 preset::save(name, &now).map_err(io)?;
                 println!("saved preset {name:?} to {}", preset::path().display());
                 Ok(())
@@ -174,42 +177,45 @@ fn run(args: &[String]) -> R {
             Some(name) => {
                 let p = preset::get(name)
                     .ok_or_else(|| format!("no preset {name:?}. Try: mchose preset"))?;
-                preset::apply(&dev, &p).map_err(io)?;
+                preset::apply(dev, &p).map_err(io)?;
                 println!("{name}");
                 describe(&p, "  ");
                 Ok(())
             }
         },
-        "raw" => raw(&dev, &args[1..]),
+        "raw" => raw(dev, &args[1..]),
         other => Err(format!("unknown command {other:?}, try --help")),
     }
 }
 
 // ------------------------------------------------------------------ device
 
-fn candidates() -> Result<Vec<hidraw::Node>, String> {
-    let nodes = hidraw::nodes().map_err(io)?;
-    Ok(nodes
-        .into_iter()
-        .filter(|n| VENDORS.contains(&n.vid) && hidraw::has_config_collection(&n.descriptor))
-        .collect())
-}
-
 fn devices() -> R {
-    let found = candidates()?;
+    let found = mchose::device::candidates().map_err(io)?;
     if found.is_empty() {
         println!("no MCHOSE configuration interface found");
         return Ok(());
     }
     for n in found {
-        println!("{}  {:04x}:{:04x}  {}", n.dev.display(), n.vid, n.pid, n.name);
+        let family = if hidraw::has_feature_report(&n.descriptor) {
+            "L7"
+        } else {
+            "G3"
+        };
+        println!(
+            "{}  {:04x}:{:04x}  {}  [{family}]",
+            n.dev.display(),
+            n.vid,
+            n.pid,
+            n.name
+        );
     }
     Ok(())
 }
 
-fn open_device(explicit: Option<&str>) -> Result<HidRaw, String> {
+fn open_device(explicit: Option<&str>) -> Result<Mouse, String> {
     if let Some(path) = explicit {
-        return HidRaw::open(std::path::Path::new(path)).map_err(|e| open_hint(path, e));
+        return mchose::device::open_path(std::path::Path::new(path)).map_err(|e| open_hint(path, e));
     }
     mchose::device::open().map_err(io)
 }
@@ -525,6 +531,285 @@ fn raw(dev: &HidRaw, args: &[String]) -> R {
             proto::send(dev, report, &body).map_err(io)?;
             println!("sent, no matching reply ({e})");
         }
+    }
+    Ok(())
+}
+
+// --------------------------------------------------------------- g3 family
+//
+// Same commands, second wire protocol. The G3 family keeps its whole config
+// in one frame (cmd 0x0E/0x0F), so every write is read-change-write-confirm.
+// What the G3 V2 does not have (profiles, game mode, motion sync, ripple)
+// gets a clear error instead of silently writing L7 frames into the void.
+
+fn run_g3(
+    m: &Mouse,
+    command: &str,
+    args: &[String],
+    raw_flag: bool,
+    stage_opt: Option<String>,
+    list_opt: Option<String>,
+) -> R {
+    match command {
+        "info" => g3_info(m),
+        "show" => g3_show(m, raw_flag),
+        "dpi" => {
+            if let Some(list) = list_opt {
+                g3_dpi_list(m, &list)
+            } else {
+                let value: u16 = num(args.get(1), "dpi <value>")?;
+                let stage = match stage_opt {
+                    Some(s) => Some(s.parse::<u8>().map_err(|_| "--stage takes 0-5")?),
+                    None => None,
+                };
+                g3_dpi(m, value, stage)
+            }
+        }
+        "stage" => g3_stage(m, num(args.get(1), "stage <0-5>")?),
+        "rate" => g3_rate(m, num(args.get(1), "rate <hz>")?),
+        "debounce" => g3_debounce(m, num(args.get(1), "debounce <ms>")?),
+        "sleep" => g3_sleep(m, num(args.get(1), "sleep <minutes>")?),
+        "lod" => {
+            let mm: u8 = num(args.get(1), "lod <mm>")?;
+            if !(1..=2).contains(&mm) {
+                return Err("lod takes 1 or 2 (mm)".into());
+            }
+            g3_edit(m, |c| c.lod = mm)?;
+            println!("lift-off distance {mm} mm");
+            Ok(())
+        }
+        "angle-snap" => {
+            let on = onoff(args.get(1))? == 1;
+            // Bit 0 of the sensor flags is what the vendor UI calls line
+            // correction; same idea as the L7 family's angle snapping.
+            g3_edit(m, |c| c.sensor = if on { c.sensor | 1 } else { c.sensor & !1 })?;
+            println!("angle snapping {}", onoff_str(on));
+            Ok(())
+        }
+        "backup" => g3_backup(m, args.get(1).map(PathBuf::from)),
+        "restore" => g3_restore(m, args.get(1).ok_or("usage: mchose restore <file>")?),
+        "preset" => match args.get(1).map(String::as_str) {
+            None => g3_list_presets(m),
+            Some("save") => Err("preset save is only implemented for the L7 family".into()),
+            Some(name) => g3_preset_apply(m, name),
+        },
+        "raw" => g3_raw(m, &args[1..]),
+        "profile" | "game-mode" | "motion-sync" | "ripple" => Err(format!(
+            "{command} is an L7-family command; this model does not have it"
+        )),
+        other => Err(format!("unknown command {other:?}, try --help")),
+    }
+}
+
+/// Read, change, write back, then read again and confirm it landed.
+fn g3_edit<F: Fn(&mut g3::Config)>(m: &Mouse, change: F) -> Result<g3::Config, String> {
+    if let Some(path) = g3::backup_once(&m.dev).map_err(io)? {
+        eprintln!("note: saved the config as it was to {}", path.display());
+    }
+    g3::edit(m, change).map_err(io)
+}
+
+fn g3_info(m: &Mouse) -> R {
+    let version = g3::version(&m.dev).unwrap_or_else(|_| "unknown".into());
+    println!("device      {:04x}:{:04x}  {}", m.vid, m.pid, m.name);
+    println!("firmware    {version}");
+    // The G3 V2's wired interface is pid 0x418c; anything else is a dongle.
+    if m.pid == 0x418c {
+        println!("link        wired");
+    } else {
+        let online = g3::online(&m.dev).map_err(io)?;
+        println!(
+            "link        2.4 GHz ({})",
+            if online != 0 { "online" } else { "offline" }
+        );
+    }
+    let (pct, charging) = g3::battery(&m.dev).map_err(io)?;
+    println!("battery     {} %{}", pct, if charging { ", charging" } else { "" });
+    Ok(())
+}
+
+fn g3_show(m: &Mouse, raw_flag: bool) -> R {
+    let c = g3::Config::read(&m.dev).map_err(io)?;
+    if c.stub {
+        println!("note        this node serves no live config; these are the factory defaults");
+    }
+    println!("stages      {} enabled", c.dpi_count);
+    for s in 0..g3::DPI_STAGES {
+        let mark = if s == c.dpi_index as usize { "*" } else { " " };
+        println!("  {mark} {s}       {} dpi", c.dpi[s]);
+    }
+    println!(
+        "rate        {}",
+        g3::RATES
+            .get(c.rate as usize)
+            .map(|hz| format!("{hz} Hz"))
+            .unwrap_or_else(|| format!("index {}", c.rate))
+    );
+    println!("debounce    {} ms", c.debounce_ms);
+    println!(
+        "sleep       {}",
+        if c.sleep_min == 0 { "off".to_string() } else { format!("{} min", c.sleep_min) }
+    );
+    println!("scroll      {}", if c.scroll_reverse { "reversed" } else { "normal" });
+    println!("angle snap  {}", onoff_str(c.sensor & 1 != 0));
+    println!("highspeed   {}", onoff_str(c.highspeed));
+    println!("rotate      {}°", c.angle);
+    println!("lod         {} mm", c.lod);
+    if raw_flag {
+        let raw = g3::read_raw(&m.dev).map_err(io)?;
+        println!("\nraw config  {}", proto::hex(&raw));
+    }
+    Ok(())
+}
+
+fn g3_check_dpi(value: u16) -> R {
+    if !(g3::DPI_MIN..=g3::DPI_MAX).contains(&value) {
+        return Err(format!(
+            "{value} dpi is outside the sensor range ({} to {})",
+            g3::DPI_MIN,
+            g3::DPI_MAX
+        ));
+    }
+    Ok(())
+}
+
+fn g3_dpi(m: &Mouse, value: u16, stage: Option<u8>) -> R {
+    g3_check_dpi(value)?;
+    let current = g3::Config::read(&m.dev).map_err(io)?;
+    let target = stage.unwrap_or(current.dpi_index) as usize;
+    if target >= g3::DPI_STAGES {
+        return Err(format!("stage must be 0-{}", g3::DPI_STAGES - 1));
+    }
+    g3_edit(m, |c| c.dpi[target] = value)?;
+    println!("stage {target} set to {value} dpi");
+    Ok(())
+}
+
+fn g3_dpi_list(m: &Mouse, list: &str) -> R {
+    let values: Vec<u16> = list
+        .split(',')
+        .map(|v| v.trim().parse::<u16>().map_err(|_| format!("{v:?} is not a DPI value")))
+        .collect::<Result<_, _>>()?;
+    if values.len() != g3::DPI_STAGES {
+        return Err(format!("--list takes exactly {} comma-separated values", g3::DPI_STAGES));
+    }
+    for v in &values {
+        g3_check_dpi(*v)?;
+    }
+    g3_edit(m, |c| {
+        c.dpi.copy_from_slice(&values);
+        c.dpi_count = g3::DPI_STAGES as u8;
+    })?;
+    println!("stages set to {}", values.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", "));
+    Ok(())
+}
+
+fn g3_stage(m: &Mouse, n: u8) -> R {
+    let c = g3_edit(m, |c| {
+        if n >= c.dpi_count {
+            c.dpi_index = c.dpi_count - 1;
+        } else {
+            c.dpi_index = n;
+        }
+    })?;
+    if n >= c.dpi_count {
+        return Err(format!("only stages 0-{} are enabled", c.dpi_count - 1));
+    }
+    println!("active stage {n} ({} dpi)", c.dpi[n as usize]);
+    Ok(())
+}
+
+fn g3_rate(m: &Mouse, hz: u32) -> R {
+    let index = g3::RATES
+        .iter()
+        .position(|r| *r == hz)
+        .ok_or_else(|| format!("rate must be one of {}", g3::RATES.map(|r| r.to_string()).join(", ")))?
+        as u8;
+    g3_edit(m, |c| c.rate = index)?;
+    println!("report rate {hz} Hz");
+    Ok(())
+}
+
+fn g3_debounce(m: &Mouse, ms: u8) -> R {
+    if ms > 30 {
+        return Err("debounce is 0 to 30 ms".into());
+    }
+    g3_edit(m, |c| c.debounce_ms = ms)?;
+    println!("debounce {ms} ms");
+    Ok(())
+}
+
+fn g3_sleep(m: &Mouse, minutes: u8) -> R {
+    if minutes > 100 {
+        return Err("sleep is 0 to 100 minutes, 0 disables".into());
+    }
+    g3_edit(m, |c| c.sleep_min = minutes)?;
+    if minutes == 0 {
+        println!("sleep disabled");
+    } else {
+        println!("sleep after {minutes} min");
+    }
+    Ok(())
+}
+
+fn g3_backup(m: &Mouse, to: Option<PathBuf>) -> R {
+    let raw = g3::read_raw(&m.dev).map_err(io)?;
+    let path = to.unwrap_or_else(|| state_dir().join("config-g3.bin"));
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir).map_err(io)?;
+    }
+    fs::write(&path, raw).map_err(io)?;
+    println!("saved {}", path.display());
+    Ok(())
+}
+
+fn g3_restore(m: &Mouse, from: &str) -> R {
+    let raw = fs::read(from).map_err(io)?;
+    if raw.len() != g3::FRAME {
+        return Err(format!("{from} is {} bytes, expected {}", raw.len(), g3::FRAME));
+    }
+    let c = g3::Config::parse(&raw).map_err(io)?;
+    c.write(&m.dev).map_err(io)?;
+    std::thread::sleep(std::time::Duration::from_millis(60));
+    let got = g3::Config::read(&m.dev).map_err(io)?;
+    if got != c {
+        return Err("the mouse did not take the restored config".into());
+    }
+    println!("restored from {from}");
+    Ok(())
+}
+
+/// The L7-only preset fields (game mode, motion sync, ripple) are skipped.
+fn g3_preset_apply(m: &Mouse, name: &str) -> R {
+    let p = preset::get(name).ok_or_else(|| format!("no preset {name:?}. Try: mchose preset"))?;
+    g3_check_dpi(p.dpi)?;
+    g3_edit(m, |c| c.apply_preset(&p))?;
+    println!("{name}");
+    describe(&p, "  ");
+    println!("  (game mode, motion sync and ripple are L7-only; left untouched)");
+    Ok(())
+}
+
+fn g3_list_presets(m: &Mouse) -> R {
+    let now = g3::Config::read(&m.dev).map_err(io)?;
+    for (name, p) in preset::all() {
+        let live = now.matches_preset(&p);
+        println!("{} {name}", if live { "*" } else { " " });
+        describe(&p, "    ");
+        println!();
+    }
+    Ok(())
+}
+
+fn g3_raw(m: &Mouse, args: &[String]) -> R {
+    let bytes: Vec<u8> = args
+        .iter()
+        .map(|v| u8::from_str_radix(v.trim_start_matches("0x"), 16).map_err(|_| format!("{v:?} is not a hex byte")))
+        .collect::<Result<_, _>>()?;
+    let (cmd, rest) = bytes.split_first().ok_or("raw <cmd> <hex bytes...>")?;
+    match g3::request(&m.dev, *cmd, rest) {
+        Ok(reply) => println!("{}", proto::hex(&reply)),
+        Err(e) => return Err(format!("no matching reply ({e})")),
     }
     Ok(())
 }

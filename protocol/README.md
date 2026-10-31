@@ -24,5 +24,13 @@ The protocol is spread over two chunks, and they are two different protocols:
   here only so the next reader does not mistake one for the other, which is
   easy to do since both live behind the same UI.
 
+There is a third protocol, and it does not live in this bundle at all: the G3
+family (G3 V2, G3 V2 Pro, G3 A, A7e) is driven by a separate iframe app at
+`mchose.com.cn/gmouse` (Next.js). `mhub-bundle/gmouse/` has its chunks; the
+transport and protocol classes are in `page.pretty.js`, the per-model configs
+(DPI range, rate lists, sensor-flag bits) in dynamically loaded chunks whose
+hashes come from the webpack runtime chunk. It is the 64-byte-frame protocol
+documented in `../PROTOCOL.md` under "The G3 family".
+
 Generated files (`*.pretty.js`, `*.clean.js`, `*.deobf.js`, `node_modules`) are
 not tracked; run `extract.sh` to get them back.
