@@ -1,6 +1,8 @@
 //! One window for the mouse. Everything applies as you touch it.
 
 use eframe::egui::{self, Color32, CornerRadius, Frame, Margin, RichText, Stroke, Vec2};
+use mchose::device::{Family, Mouse};
+use mchose::g3;
 use mchose::hidraw::HidRaw;
 use mchose::logln;
 use mchose::preset::{self, Preset};
@@ -28,6 +30,9 @@ const BAD: Color32 = Color32::from_rgb(0xE0, 0x62, 0x5A);
 #[derive(Clone, Default)]
 struct Snapshot {
     present: bool,
+    /// G3-family mouse: different rate list and DPI bounds, no motion sync,
+    /// ripple or game mode.
+    g3: bool,
     model: String,
     firmware: String,
     link: String,
@@ -69,29 +74,62 @@ fn worker(rx: Receiver<Cmd>, tx: Sender<Msg>, ctx: egui::Context) {
     let mut lod = load_lod();
     while let Ok(cmd) = rx.recv() {
         let result = (|| -> Result<Snapshot, String> {
-            let dev = open().map_err(|e| e)?;
-            match cmd {
-                Cmd::Refresh => {}
-                Cmd::Preset(ref name) => {
-                    let p = preset::get(name).ok_or_else(|| format!("no preset {name:?}"))?;
-                    preset::apply(&dev, &p).map_err(str_err)?;
-                    lod = p.lod;
+            let m = open()?;
+            match m.family {
+                Family::L7 => {
+                    let dev = &m.dev;
+                    match &cmd {
+                        Cmd::Refresh => {}
+                        Cmd::Preset(name) => {
+                            let p = preset::get(name).ok_or_else(|| format!("no preset {name:?}"))?;
+                            preset::apply(dev, &p).map_err(str_err)?;
+                            lod = p.lod;
+                        }
+                        Cmd::Dpi(stage, value) => edit(dev, |c| c.set_dpi(*stage, *value))?,
+                        Cmd::Stage(n) => edit(dev, |c| c.set_dpi_stage(*n))?,
+                        Cmd::Rate(index) => {
+                            proto::set_report_rate(dev, *index, *index).map_err(str_err)?;
+                        }
+                        Cmd::Debounce(ms) => edit(dev, |c| c.set_debounce_ms(*ms))?,
+                        Cmd::Sleep(min) => edit(dev, |c| c.set_sleep_minutes(*min))?,
+                        Cmd::Flags { lod: l, ripple, angle_snap, motion_sync } => {
+                            proto::set_flags(dev, *l, *ripple, *angle_snap, *motion_sync)
+                                .map_err(str_err)?;
+                            lod = *l;
+                            save_lod(*l);
+                        }
+                        Cmd::GameMode(mode) => proto::set_game_mode(dev, *mode).map_err(str_err)?,
+                    }
+                    read_l7(dev, lod)
                 }
-                Cmd::Dpi(stage, value) => edit(&dev, |c| c.set_dpi(stage, value))?,
-                Cmd::Stage(n) => edit(&dev, |c| c.set_dpi_stage(n))?,
-                Cmd::Rate(index) => {
-                    proto::set_report_rate(&dev, index, index).map_err(str_err)?;
+                Family::G3 => {
+                    match &cmd {
+                        Cmd::Refresh | Cmd::GameMode(_) => {}
+                        Cmd::Preset(name) => {
+                            let p = preset::get(name).ok_or_else(|| format!("no preset {name:?}"))?;
+                            edit_g3(&m, |c| c.apply_preset(&p))?;
+                        }
+                        Cmd::Dpi(stage, value) => edit_g3(&m, |c| {
+                            if *stage < g3::DPI_STAGES {
+                                c.dpi[*stage] = (*value).clamp(g3::DPI_MIN, g3::DPI_MAX);
+                            }
+                        })?,
+                        Cmd::Stage(n) => edit_g3(&m, |c| c.dpi_index = (*n).min(c.dpi_count - 1))?,
+                        Cmd::Rate(index) => {
+                            edit_g3(&m, |c| c.rate = (*index).min(g3::RATES.len() as u8 - 1))?
+                        }
+                        Cmd::Debounce(ms) => edit_g3(&m, |c| c.debounce_ms = (*ms).min(30))?,
+                        Cmd::Sleep(min) => edit_g3(&m, |c| c.sleep_min = (*min).min(100))?,
+                        // Motion sync and ripple are L7-only; the G3 UI never
+                        // sends them, so only lod and angle snapping apply.
+                        Cmd::Flags { lod: l, angle_snap, .. } => edit_g3(&m, |c| {
+                            c.lod = if *l == 0 { 1 } else { 2 };
+                            c.sensor = if *angle_snap { c.sensor | 1 } else { c.sensor & !1 };
+                        })?,
+                    }
+                    read_g3(&m)
                 }
-                Cmd::Debounce(ms) => edit(&dev, |c| c.set_debounce_ms(ms))?,
-                Cmd::Sleep(min) => edit(&dev, |c| c.set_sleep_minutes(min))?,
-                Cmd::Flags { lod: l, ripple, angle_snap, motion_sync } => {
-                    proto::set_flags(&dev, l, ripple, angle_snap, motion_sync).map_err(str_err)?;
-                    lod = l;
-                    save_lod(l);
-                }
-                Cmd::GameMode(m) => proto::set_game_mode(&dev, m).map_err(str_err)?,
             }
-            read(&dev, lod)
         })();
         let msg = match result {
             Ok(s) => Msg::State(Box::new(s)),
@@ -106,15 +144,53 @@ fn str_err(e: std::io::Error) -> String {
     e.to_string()
 }
 
-fn open() -> Result<HidRaw, String> {
-    let m = mchose::device::open().map_err(str_err)?;
-    if m.family != mchose::device::Family::L7 {
+fn open() -> Result<Mouse, String> {
+    mchose::device::open().map_err(str_err)
+}
+
+/// Read, change, write and confirm through the shared G3 helper; keep the
+/// one-time backup of the untouched config here too.
+fn edit_g3<F: Fn(&mut g3::Config)>(m: &Mouse, change: F) -> Result<(), String> {
+    if let Some(path) = g3::backup_once(&m.dev).map_err(str_err)? {
+        logln!("gui: saved the original G3 config to {}", path.display());
+    }
+    g3::edit(m, change).map_err(str_err)?;
+    Ok(())
+}
+
+fn read_g3(m: &Mouse) -> Result<Snapshot, String> {
+    let c = g3::Config::read(&m.dev).map_err(str_err)?;
+    if c.stub {
         return Err(
-            "this is a G3-family mouse; the GUI only speaks the L7 protocol so far, use the mchose CLI"
+            "this node is not serving the mouse's live config; plug the mouse in with the cable"
                 .into(),
         );
     }
-    Ok(m.dev)
+    // pid 0x418c is the wired G3 V2; other G3 nodes are dongles.
+    let wired = m.pid == 0x418c;
+    let (battery, charging) = g3::battery(&m.dev).unwrap_or((0, false));
+    let preset = preset::all().into_iter().find(|(_, p)| c.matches_preset(p)).map(|(n, _)| n);
+    Ok(Snapshot {
+        present: true,
+        g3: true,
+        model: m.name.clone(),
+        firmware: g3::version(&m.dev).unwrap_or_default(),
+        link: if wired { "wired" } else { "2.4 GHz" }.into(),
+        online: wired || g3::online(&m.dev).unwrap_or(1) != 0,
+        battery,
+        charging,
+        dpi: c.dpi,
+        stage: c.dpi_index,
+        rate: c.rate,
+        debounce: c.debounce_ms,
+        sleep: c.sleep_min,
+        ripple: false,
+        angle_snap: c.sensor & 1 != 0,
+        motion_sync: false,
+        lod: if c.lod == 2 { 1 } else { 0 },
+        game_mode: 0,
+        preset,
+    })
 }
 
 fn edit<F: Fn(&mut Config)>(dev: &HidRaw, change: F) -> Result<(), String> {
@@ -135,7 +211,7 @@ fn edit<F: Fn(&mut Config)>(dev: &HidRaw, change: F) -> Result<(), String> {
     Err(format!("the mouse did not take that change ({diff})"))
 }
 
-fn read(dev: &HidRaw, lod: u8) -> Result<Snapshot, String> {
+fn read_l7(dev: &HidRaw, lod: u8) -> Result<Snapshot, String> {
     let id = proto::identity(dev).map_err(str_err)?;
     let c = Config::read(dev).map_err(str_err)?;
     let (ripple, angle_snap, motion_sync) = c.perf_flags();
@@ -159,6 +235,7 @@ fn read(dev: &HidRaw, lod: u8) -> Result<Snapshot, String> {
     let preset = preset::all().into_iter().find(|(_, p)| *p == live).map(|(n, _)| n);
     Ok(Snapshot {
         present: true,
+        g3: false,
         model: model_name(id.pid),
         firmware: proto::version_string(dev).unwrap_or_default(),
         link: match id.connect_mode {
@@ -416,8 +493,13 @@ impl App {
 
             let stage = (self.state.stage as usize).min(DPI_STAGES - 1);
             let mut value = self.dragging_dpi.unwrap_or(self.state.dpi[stage]);
+            let range = if self.state.g3 {
+                g3::DPI_MIN..=g3::DPI_MAX
+            } else {
+                50..=26000
+            };
             let response = ui.add(
-                egui::Slider::new(&mut value, 50..=26000)
+                egui::Slider::new(&mut value, range)
                     // Linear, every useful setting sits in the first tenth of
                     // the track; the sensor's range only reads well on a log.
                     .logarithmic(true)
@@ -443,13 +525,15 @@ impl App {
     }
 
     fn rate_section(&mut self, ui: &mut egui::Ui) {
+        // The G3 V2 is a 1 kHz-only part; the L7 family goes to 8 kHz.
+        let rates: &[u32] = if self.state.g3 { &g3::RATES } else { &RATES };
         section(ui, "Report rate");
         card(ui, |ui| {
-            let width = share(ui, RATES.len());
+            let width = share(ui, rates.len());
             let mut pick = None;
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = GAP;
-                for (i, hz) in RATES.iter().enumerate() {
+                for (i, hz) in rates.iter().enumerate() {
                     let active = self.state.rate as usize == i;
                     if chip(ui, &format!("{hz}"), active, width).clicked() && !active {
                         pick = Some(i as u8);
@@ -477,8 +561,11 @@ impl App {
             let mut motion = self.state.motion_sync;
             let mut ripple = self.state.ripple;
             let mut snap = self.state.angle_snap;
-            row(ui, "Motion sync", |ui| dot(ui, &mut motion));
-            row(ui, "Ripple control", |ui| dot(ui, &mut ripple));
+            // Motion sync and ripple are L7-family features.
+            if !self.state.g3 {
+                row(ui, "Motion sync", |ui| dot(ui, &mut motion));
+                row(ui, "Ripple control", |ui| dot(ui, &mut ripple));
+            }
             row(ui, "Angle snapping", |ui| dot(ui, &mut snap));
             if lod != self.state.lod
                 || motion != self.state.motion_sync
@@ -488,17 +575,20 @@ impl App {
                 self.send(Cmd::Flags { lod, ripple, angle_snap: snap, motion_sync: motion });
             }
 
-            let mut game = self.state.game_mode;
-            row(ui, "Game mode", |ui| {
-                ui.spacing_mut().item_spacing.x = GAP;
-                for m in (1..=3u8).rev() {
-                    if chip(ui, &m.to_string(), game == m, 40.0).clicked() {
-                        game = m;
+            // Game mode is L7-family only.
+            if !self.state.g3 {
+                let mut game = self.state.game_mode;
+                row(ui, "Game mode", |ui| {
+                    ui.spacing_mut().item_spacing.x = GAP;
+                    for m in (1..=3u8).rev() {
+                        if chip(ui, &m.to_string(), game == m, 40.0).clicked() {
+                            game = m;
+                        }
                     }
+                });
+                if game != self.state.game_mode {
+                    self.send(Cmd::GameMode(game));
                 }
-            });
-            if game != self.state.game_mode {
-                self.send(Cmd::GameMode(game));
             }
         });
 
@@ -513,7 +603,8 @@ impl App {
 
             let mut sleep = self.state.sleep;
             let sleep_text = if sleep == 0 { "off".to_string() } else { format!("{sleep} min") };
-            if slider_row(ui, "Sleep", &mut sleep, 0..=60, &sleep_text) {
+            let sleep_range = if self.state.g3 { 0..=100 } else { 0..=60 };
+            if slider_row(ui, "Sleep", &mut sleep, sleep_range, &sleep_text) {
                 self.send(Cmd::Sleep(sleep));
             }
         });

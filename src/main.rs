@@ -603,35 +603,10 @@ fn run_g3(
 
 /// Read, change, write back, then read again and confirm it landed.
 fn g3_edit<F: Fn(&mut g3::Config)>(m: &Mouse, change: F) -> Result<g3::Config, String> {
-    g3_backup_once(m)?;
-    let mut c = g3::Config::read(&m.dev).map_err(io)?;
-    if c.stub {
-        return Err(
-            "this node is not serving the mouse's live config (a dongle while the mouse is on the cable, or the wireless link is down). Use the wired node"
-                .into(),
-        );
+    if let Some(path) = g3::backup_once(&m.dev).map_err(io)? {
+        eprintln!("note: saved the config as it was to {}", path.display());
     }
-    // Observed on the G3 V2: with the mouse on the cable, its dongle keeps a
-    // private config cache and writes to it go nowhere the mouse can see.
-    // Refuse instead of pretending. pid 0x418c is the wired G3 V2.
-    if m.pid != 0x418c {
-        if let Ok(nodes) = mchose::device::candidates() {
-            if nodes.iter().any(|n| n.pid == 0x418c) {
-                return Err(
-                    "the mouse is also on the cable; the dongle does not proxy writes in this state. Write via the wired node"
-                        .into(),
-                );
-            }
-        }
-    }
-    change(&mut c);
-    c.write(&m.dev).map_err(io)?;
-    std::thread::sleep(std::time::Duration::from_millis(60));
-    let got = g3::Config::read(&m.dev).map_err(io)?;
-    if got != c {
-        return Err("the mouse did not take the setting (read-back differs)".into());
-    }
-    Ok(got)
+    g3::edit(m, change).map_err(io)
 }
 
 fn g3_info(m: &Mouse) -> R {
@@ -788,21 +763,6 @@ fn g3_backup(m: &Mouse, to: Option<PathBuf>) -> R {
     Ok(())
 }
 
-/// Keep one copy of the config as it was before this tool ever wrote to it.
-fn g3_backup_once(m: &Mouse) -> R {
-    let path = state_dir().join("config-g3.original.bin");
-    if path.exists() {
-        return Ok(());
-    }
-    let raw = g3::read_raw(&m.dev).map_err(io)?;
-    if let Some(dir) = path.parent() {
-        fs::create_dir_all(dir).map_err(io)?;
-    }
-    fs::write(&path, raw).map_err(io)?;
-    eprintln!("note: saved the config as it was to {}", path.display());
-    Ok(())
-}
-
 fn g3_restore(m: &Mouse, from: &str) -> R {
     let raw = fs::read(from).map_err(io)?;
     if raw.len() != g3::FRAME {
@@ -822,45 +782,18 @@ fn g3_restore(m: &Mouse, from: &str) -> R {
 /// The L7-only preset fields (game mode, motion sync, ripple) are skipped.
 fn g3_preset_apply(m: &Mouse, name: &str) -> R {
     let p = preset::get(name).ok_or_else(|| format!("no preset {name:?}. Try: mchose preset"))?;
-    let stage = (p.stage as usize).min(g3::DPI_STAGES - 1);
     g3_check_dpi(p.dpi)?;
-    g3_edit(m, |c| {
-        c.dpi[stage] = p.dpi;
-        c.dpi_index = stage as u8;
-        if let Some(index) = g3::RATES.iter().position(|r| *r == p.rate_hz) {
-            c.rate = index as u8;
-        }
-        c.lod = if p.lod == 0 { 1 } else { 2 };
-        c.debounce_ms = p.debounce_ms;
-        c.sleep_min = p.sleep_min;
-        c.sensor = if p.angle_snap { c.sensor | 1 } else { c.sensor & !1 };
-    })?;
+    g3_edit(m, |c| c.apply_preset(&p))?;
     println!("{name}");
     describe(&p, "  ");
     println!("  (game mode, motion sync and ripple are L7-only; left untouched)");
     Ok(())
 }
 
-/// Does the live G3 config match the fields of this preset that exist on
-// this family?
-fn g3_preset_matches(c: &g3::Config, p: &Preset) -> bool {
-    if c.stub {
-        return false;
-    }
-    let i = c.dpi_index as usize;
-    c.dpi[i] == p.dpi
-        && c.dpi_index == p.stage
-        && g3::RATES[c.rate as usize] == p.rate_hz
-        && c.lod == if p.lod == 0 { 1 } else { 2 }
-        && c.debounce_ms == p.debounce_ms
-        && c.sleep_min == p.sleep_min
-        && (c.sensor & 1 != 0) == p.angle_snap
-}
-
 fn g3_list_presets(m: &Mouse) -> R {
     let now = g3::Config::read(&m.dev).map_err(io)?;
     for (name, p) in preset::all() {
-        let live = g3_preset_matches(&now, &p);
+        let live = now.matches_preset(&p);
         println!("{} {name}", if live { "*" } else { " " });
         describe(&p, "    ");
         println!();

@@ -18,10 +18,13 @@
 //! including the fixed 10-byte request headers, because the firmware was only
 //! ever tested against those.
 
+use crate::device::{self, Mouse};
 use crate::hidraw::HidRaw;
 use crate::logln;
+use crate::preset::Preset;
 use crate::proto::hex;
 use std::io;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 const SYNC: u8 = 0x55;
@@ -252,6 +255,82 @@ impl Config {
         request(dev, CMD_CONFIG_WRITE, &f[2..FRAME])?;
         Ok(())
     }
+
+    /// True when this config matches every field of the preset the G3 family
+    /// has. Game mode, motion sync and ripple are L7-only.
+    pub fn matches_preset(&self, p: &Preset) -> bool {
+        if self.stub {
+            return false;
+        }
+        let i = self.dpi_index as usize;
+        self.dpi[i] == p.dpi
+            && self.dpi_index == p.stage
+            && RATES[self.rate as usize] == p.rate_hz
+            && self.lod == if p.lod == 0 { 1 } else { 2 }
+            && self.debounce_ms == p.debounce_ms
+            && self.sleep_min == p.sleep_min
+            && (self.sensor & 1 != 0) == p.angle_snap
+    }
+
+    /// Apply the fields of a preset this family has, clamped to its ranges.
+    pub fn apply_preset(&mut self, p: &Preset) {
+        let stage = (p.stage as usize).min(DPI_STAGES - 1);
+        self.dpi[stage] = p.dpi.clamp(DPI_MIN, DPI_MAX);
+        self.dpi_index = stage as u8;
+        if let Some(index) = RATES.iter().position(|r| *r == p.rate_hz) {
+            self.rate = index as u8;
+        }
+        self.lod = if p.lod == 0 { 1 } else { 2 };
+        self.debounce_ms = p.debounce_ms;
+        self.sleep_min = p.sleep_min;
+        self.sensor = if p.angle_snap { self.sensor | 1 } else { self.sensor & !1 };
+    }
+}
+
+/// Save the raw config block the first time anything writes, so there is
+/// always a way back. Returns the path when it was created.
+pub fn backup_once(dev: &HidRaw) -> io::Result<Option<PathBuf>> {
+    let path = crate::log::path().with_file_name("config-g3.original.bin");
+    if path.exists() {
+        return Ok(None);
+    }
+    let raw = read_raw(dev)?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(&path, raw)?;
+    Ok(Some(path))
+}
+
+/// Read, change, write and confirm a config, refusing nodes that cannot
+/// carry the write: a stub config (no live config is served), or a dongle
+/// while the wired sibling is present — observed on the G3 V2, where the
+/// dongle keeps a private config cache and does not proxy (verified by
+/// unbinding the wired USB device: writes landed in the cache only).
+pub fn edit<F: Fn(&mut Config)>(m: &Mouse, change: F) -> io::Result<Config> {
+    let mut c = Config::read(&m.dev)?;
+    if c.stub {
+        return Err(io::Error::other(
+            "this node is not serving the mouse's live config (a dongle while the mouse is on the cable, or the wireless link is down). Use the wired node",
+        ));
+    }
+    if m.pid != 0x418c {
+        if let Ok(nodes) = device::candidates() {
+            if nodes.iter().any(|n| n.pid == 0x418c) {
+                return Err(io::Error::other(
+                    "the mouse is also on the cable; the dongle does not proxy writes in this state. Write via the wired node",
+                ));
+            }
+        }
+    }
+    change(&mut c);
+    c.write(&m.dev)?;
+    std::thread::sleep(Duration::from_millis(60));
+    let got = Config::read(&m.dev)?;
+    if got != c {
+        return Err(io::Error::other("the mouse did not take the setting (read-back differs)"));
+    }
+    Ok(got)
 }
 
 #[cfg(test)]

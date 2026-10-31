@@ -48,7 +48,8 @@ handles both; `mchose devices` labels each node `[L7]` or `[G3]`. G3-family
 support covers info, show, dpi, stage, rate (125/250/500/1000), debounce,
 sleep, lod, angle-snap (the vendor UI's "line correction"), backup/restore,
 presets and raw; profiles, game mode, motion sync and ripple are L7-family
-features and are refused with a clear error. The GUI is L7-only for now.
+features and are refused with a clear error in the CLI and hidden in the GUI,
+which speaks both protocols.
 
 G3-family support was developed and verified on a **MCHOSE G3 V2** (wired
 firmware 2.3.5, dongle 2.7.3). When the mouse and its dongle are both
