@@ -41,10 +41,20 @@ Developed and verified on an **MCHOSE L7 Pro** (`5253:1020`, 8 kHz dongle,
 if yours does not, open an issue with the output of `mchose devices` and
 `mchose log`.
 
-**Not supported: the G3 family** (G3 V2 `3837:4245` and its siblings). They
-show up in `mchose devices` because they carry the same vendor collection, but
-M HUB drives them with a different protocol, so `mchose info` answers "is not
-supported" rather than talking to them.
+**The G3 family** (G3 V2 `3837:418c` / `3837:4245` dongle, G3 V2 Pro, G3 A,
+A7e) speaks a second protocol — 64-byte frames on the interrupt pipes instead
+of feature reports. The CLI detects the family from the report descriptor and
+handles both; `mchose devices` labels each node `[L7]` or `[G3]`. G3-family
+support covers info, show, dpi, stage, rate (125/250/500/1000), debounce,
+sleep, lod, angle-snap (the vendor UI's "line correction"), backup/restore,
+presets and raw; profiles, game mode, motion sync and ripple are L7-family
+features and are refused with a clear error. The GUI is L7-only for now.
+
+G3-family support was developed and verified on a **MCHOSE G3 V2** (wired
+firmware 2.3.5, dongle 2.7.3). When the mouse and its dongle are both
+plugged in, the wired node is the one to trust — the dongle keeps a private
+config cache and writes to it do not reach the mouse, so the tool refuses
+them and points at the wired node.
 
 ## Install
 
@@ -120,8 +130,16 @@ the button on the mouse keeps working. Saved presets live in
 The mouse's third USB interface carries two vendor HID collections, `0xFF01` and
 `0xFF0B`. Every setting is a **feature report** on report ID `0x11` (20 bytes) or
 `0x12` (64 bytes), with the whole payload inverted `^ 0xFF`, padding included.
-There is no checksum. `PROTOCOL.md` has the frame, both command tables, the
-config block field by field, and the six things the vendor's own code does not
+There is no checksum.
+
+The G3 family is different: its vendor collection declares no feature reports
+at all, only a 64-byte input and output report, and every exchange is one
+frame `55 <cmd> <args>` answered by `AA <cmd> <payload>` on the interrupt
+pipes. The tool picks the family by walking the report descriptor: a Feature
+item means L7, none means G3.
+
+`PROTOCOL.md` has both protocols: the frame formats, the command tables, the
+config blocks field by field, and the things the vendor's own code does not
 say and the hardware does.
 
 `protocol/` holds the two scripts that recover it: `fetch.sh` downloads the M HUB

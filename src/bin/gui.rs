@@ -107,7 +107,14 @@ fn str_err(e: std::io::Error) -> String {
 }
 
 fn open() -> Result<HidRaw, String> {
-    mchose::device::open().map_err(str_err)
+    let m = mchose::device::open().map_err(str_err)?;
+    if m.family != mchose::device::Family::L7 {
+        return Err(
+            "this is a G3-family mouse; the GUI only speaks the L7 protocol so far, use the mchose CLI"
+                .into(),
+        );
+    }
+    Ok(m.dev)
 }
 
 fn edit<F: Fn(&mut Config)>(dev: &HidRaw, change: F) -> Result<(), String> {
